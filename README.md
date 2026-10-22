@@ -126,3 +126,7 @@ scripts/build.sh           編譯並打包成 .app
 ```bash
 swift build && MOYU_DEBUG=1 .build/debug/MoyuBrowser
 ```
+
+## 授權
+
+[MIT](LICENSE)
