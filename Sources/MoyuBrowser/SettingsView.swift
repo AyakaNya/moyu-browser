@@ -2,22 +2,54 @@ import AppKit
 import SwiftUI
 import WebKit
 
-struct SettingsView: View {
-    @ObservedObject var settings: Settings
-    @ObservedObject var bookmarks: BookmarkStore
+/// 設定視窗：分頁放在工具列（macOS 原生設定視窗的樣式），每頁內容是一層分組表單。
+/// SwiftUI 的 TabView 放在一般視窗裡會多畫一層舊式分頁外框，跟視窗圓角和表單分組都不搭。
+@MainActor
+enum SettingsWindow {
+    static func make(settings: Settings, bookmarks: BookmarkStore) -> NSWindow {
+        let tabs = SettingsTabController()
+        tabs.tabStyle = .toolbar
+        tabs.addTabViewItem(page("一般", "gearshape", height: 440, GeneralTab(settings: settings)))
+        tabs.addTabViewItem(page("外觀", "paintbrush", height: 500, AppearanceTab(settings: settings)))
+        tabs.addTabViewItem(page("收藏", "star", height: 460, BookmarksTab(bookmarks: bookmarks)))
+        tabs.addTabViewItem(page("Cookie", "externaldrive", height: 520, WebsiteDataTab()))
 
-    var body: some View {
-        TabView {
-            GeneralTab(settings: settings)
-                .tabItem { Label("一般", systemImage: "gearshape") }
-            AppearanceTab(settings: settings)
-                .tabItem { Label("外觀", systemImage: "paintbrush") }
-            BookmarksTab(bookmarks: bookmarks)
-                .tabItem { Label("收藏", systemImage: "star") }
-            WebsiteDataTab()
-                .tabItem { Label("Cookie", systemImage: "externaldrive") }
-        }
-        .frame(width: 480, height: 560)
+        let window = NSWindow(contentViewController: tabs)
+        window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        window.level = .floating
+        tabs.fitWindow(to: tabs.tabViewItems[tabs.selectedTabViewItemIndex], animate: false)
+        return window
+    }
+
+    private static func page(_ title: String, _ symbol: String, height: CGFloat,
+                             _ view: some View) -> NSTabViewItem {
+        let controller = NSHostingController(rootView: view.frame(width: 480, height: height))
+        controller.sizingOptions = [.preferredContentSize]
+        // 工具列分頁會拿這個當視窗標題
+        controller.title = title
+        let item = NSTabViewItem(viewController: controller)
+        item.label = title
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        return item
+    }
+}
+
+/// 切換分頁時把視窗標題換成分頁名稱，並讓視窗大小剛好貼合該頁內容（左上角不動）
+private final class SettingsTabController: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        if let tabViewItem { fitWindow(to: tabViewItem, animate: true) }
+    }
+
+    func fitWindow(to item: NSTabViewItem, animate: Bool) {
+        guard let window = view.window, let content = item.viewController?.preferredContentSize,
+              content != .zero else { return }
+        window.title = item.label
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: content))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: animate)
     }
 }
 
@@ -89,12 +121,12 @@ private struct BookmarksTab: View {
     @ObservedObject var bookmarks: BookmarkStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if bookmarks.items.isEmpty {
-                ContentUnavailableView("還沒有收藏", systemImage: "star",
-                                       description: Text("在面板裡按 ⌘D 收藏目前的網頁"))
-            } else {
-                List {
+        if bookmarks.items.isEmpty {
+            ContentUnavailableView("還沒有收藏", systemImage: "star",
+                                   description: Text("在面板裡按 ⌘D 收藏目前的網頁"))
+        } else {
+            Form {
+                Section {
                     ForEach(bookmarks.items) { bookmark in
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
@@ -110,11 +142,12 @@ private struct BookmarksTab: View {
                         }
                     }
                     .onMove { bookmarks.move(from: $0, to: $1) }
+                } footer: {
+                    Text("拖曳可以調整順序").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("拖曳可以調整順序").font(.caption).foregroundStyle(.secondary)
             }
+            .formStyle(.grouped)
         }
-        .padding()
     }
 }
 
@@ -139,47 +172,53 @@ private struct WebsiteDataTab: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Cookie 和登入狀態會一直保存在這台 Mac 上，重開 App 也不用重新登入。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                TextField("搜尋網站", text: $filter).textFieldStyle(.roundedBorder)
-                Button("重新整理") { Task { await reload() } }
+        Form {
+            Section {
+                TextField("搜尋網站", text: $filter)
+            } footer: {
+                Text("Cookie 和登入狀態會一直保存在這台 Mac 上，重開 App 也不用重新登入。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
-            if loading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if filtered.isEmpty {
-                ContentUnavailableView("沒有網站資料", systemImage: "externaldrive")
-            } else {
-                List(filtered) { site in
-                    HStack {
-                        Image(systemName: site.hasCookies ? "lock.shield" : "doc")
-                            .foregroundStyle(.secondary)
-                        Text(site.id)
-                        Spacer()
-                        if site.hasCookies {
-                            Text("Cookie").font(.caption).foregroundStyle(.secondary)
+            Section {
+                if loading {
+                    HStack { Spacer(); ProgressView().controlSize(.small); Spacer() }
+                } else if filtered.isEmpty {
+                    Text("沒有網站資料").foregroundStyle(.secondary)
+                } else {
+                    ForEach(filtered) { site in
+                        HStack {
+                            Image(systemName: site.hasCookies ? "lock.shield" : "doc")
+                                .foregroundStyle(.secondary)
+                            Text(site.id)
+                            Spacer()
+                            if site.hasCookies {
+                                Text("Cookie").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Button(role: .destructive) { Task { await remove(site) } } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("清除這個網站的資料（會登出）")
                         }
-                        Button(role: .destructive) { Task { await remove(site) } } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("清除這個網站的資料（會登出）")
                     }
+                }
+            } header: {
+                HStack {
+                    Text("\(sites.count) 個網站")
+                    Spacer()
+                    Button("重新整理") { Task { await reload() } }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
                 }
             }
 
-            HStack {
-                Text("\(sites.count) 個網站").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("清除全部…", role: .destructive) { confirmClearAll = true }
+            Section {
+                Button("清除全部網站資料…", role: .destructive) { confirmClearAll = true }
                     .disabled(sites.isEmpty)
             }
         }
-        .padding()
+        .formStyle(.grouped)
         .task { await reload() }
         .confirmationDialog("要清除所有網站的 Cookie 和資料嗎？", isPresented: $confirmClearAll) {
             Button("清除全部", role: .destructive) { Task { await clearAll() } }

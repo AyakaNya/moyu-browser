@@ -166,12 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func openSettings() {
         if settingsWindow == nil {
-            let host = NSHostingController(rootView: SettingsView(settings: settings, bookmarks: .shared))
-            let window = NSWindow(contentViewController: host)
-            window.title = "摸魚瀏覽器設定"
-            window.styleMask = [.titled, .closable]
-            window.isReleasedWhenClosed = false
-            window.level = .floating
+            let window = SettingsWindow.make(settings: settings, bookmarks: .shared)
             window.center()
             settingsWindow = window
         }
