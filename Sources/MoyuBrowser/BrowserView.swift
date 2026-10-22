@@ -9,6 +9,7 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
 
     private let model = BrowserModel()
     private let bookmarks = BookmarkStore.shared
+    private let suggestions = SuggestionProvider()
     private let overlay: OverlayHostingView
     /// 放目前分頁網頁的容器，切換分頁時在這裡做推移轉場
     private let pageContainer = NSView()
@@ -62,7 +63,8 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     var onNeedsAttention: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
-        overlay = OverlayHostingView(rootView: BrowserOverlay(model: model, bookmarks: BookmarkStore.shared))
+        overlay = OverlayHostingView(rootView: BrowserOverlay(model: model, bookmarks: .shared,
+                                                              suggestions: suggestions, engines: .shared))
         super.init(frame: frameRect)
 
         wantsLayer = true
@@ -144,6 +146,9 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         model.onOpen = { [weak self] url in self?.open(url) }
         model.onDismiss = { [weak self] in self?.hideAddressBar() }
         model.onToggleBookmark = { [weak self] in self?.toggleBookmark() }
+        model.onSearch = { [weak self] text in
+            if let url = SearchEngineStore.shared.current.url(for: text) { self?.open(url) }
+        }
         model.onShowOverview = { [weak self] in self?.showOverview() }
         model.onDismissOverview = { [weak self] in self?.hideOverview() }
         model.onSelectTab = { [weak self] id in
@@ -445,7 +450,7 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         }
     }
 
-    /// 有網址格式就直接開，否則當作關鍵字丟給 Google
+    /// 有網址格式就直接開，否則用搜尋引擎搜尋（開頭是引擎縮寫就用那個引擎）
     static func url(from text: String) -> URL? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -456,9 +461,7 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         if !text.contains(" "), text.contains("."), let url = URL(string: "https://" + text) {
             return url
         }
-        var components = URLComponents(string: "https://www.google.com/search")!
-        components.queryItems = [URLQueryItem(name: "q", value: text)]
-        return components.url
+        return SearchEngineStore.shared.searchURL(for: text)
     }
 
     /// 載入進度、主題色只看目前分頁
@@ -488,8 +491,9 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         needsDisplay = true
     }
 
-    // 目前分頁載入完就更新縮圖，分頁總覽才有最新畫面
+    // 載入完記進瀏覽紀錄；目前分頁還要更新縮圖，分頁總覽才有最新畫面
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let url = webView.url { HistoryStore.shared.recordVisit(url: url, title: webView.title ?? "") }
         guard let tab = tabs.first(where: { $0.webView === webView }), webView === self.webView else { return }
         Task {
             await tab.updateSnapshot()

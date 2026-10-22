@@ -10,11 +10,11 @@ enum SettingsWindow {
     static func make(settings: Settings, bookmarks: BookmarkStore) -> NSWindow {
         let tabs = SettingsTabController()
         tabs.tabStyle = .toolbar
-        tabs.addTabViewItem(page("一般", "gearshape", height: 440, GeneralTab(settings: settings)))
+        tabs.addTabViewItem(page("一般", "gearshape", height: 600, GeneralTab(settings: settings, engines: .shared)))
         tabs.addTabViewItem(page("外觀", "paintbrush", height: 500, AppearanceTab(settings: settings)))
         tabs.addTabViewItem(page("快捷鍵", "keyboard", height: 560, ShortcutsTab(store: .shared)))
         tabs.addTabViewItem(page("收藏", "star", height: 460, BookmarksTab(bookmarks: bookmarks)))
-        tabs.addTabViewItem(page("Cookie", "externaldrive", height: 520, WebsiteDataTab()))
+        tabs.addTabViewItem(page("隱私", "hand.raised", height: 560, WebsiteDataTab(history: .shared)))
 
         let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable]
@@ -59,6 +59,8 @@ private final class SettingsTabController: NSTabViewController {
 
 private struct GeneralTab: View {
     @ObservedObject var settings: Settings
+    @ObservedObject var engines: SearchEngineStore
+    @State private var addingEngine = false
 
     var body: some View {
         Form {
@@ -84,12 +86,99 @@ private struct GeneralTab: View {
                 SliderRow(title: "收起延遲", value: $settings.collapseDelay, range: 0...3, step: 0.1, format: "%.1f 秒")
             }
 
+            Section {
+                Picker("搜尋引擎", selection: $engines.defaultID) {
+                    ForEach(engines.all) { Text($0.name).tag($0.id) }
+                }
+                Toggle("搜尋建議", isOn: $engines.suggestionsEnabled)
+            } header: {
+                Text("搜尋")
+            } footer: {
+                Text("開啟時，在網址列輸入的文字會傳送給搜尋引擎以取得建議。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                ForEach(engines.all) { engine in
+                    HStack {
+                        Text(engine.name)
+                        Spacer()
+                        Text(engine.keyword).foregroundStyle(.secondary).monospaced()
+                        if !engine.isBuiltIn {
+                            Button(role: .destructive) { engines.remove(engine) } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("刪除")
+                        }
+                    }
+                }
+                Button("新增搜尋引擎…") { addingEngine = true }
+            } header: {
+                Text("縮寫")
+            } footer: {
+                Text("在網址列輸入「縮寫 關鍵字」，就用對應的搜尋引擎搜尋。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("網頁") {
                 Toggle("使用手機版網頁", isOn: $settings.mobileUserAgent)
                 TextField("首頁", text: $settings.homeURL)
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: $addingEngine) { AddEngineSheet(engines: engines) }
+    }
+}
+
+/// 新增自訂搜尋引擎：名稱、含 %s 的網址、縮寫
+private struct AddEngineSheet: View {
+    @ObservedObject var engines: SearchEngineStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var url = ""
+    @State private var keyword = ""
+
+    private var problem: String? {
+        let url = url.trimmingCharacters(in: .whitespaces)
+        if !url.isEmpty, !url.contains("%s") { return "網址裡要用 %s 代表搜尋關鍵字" }
+        if !url.isEmpty, URL(string: url.replacingOccurrences(of: "%s", with: "test"))?.scheme == nil {
+            return "網址格式不正確"
+        }
+        if !keyword.isEmpty, keyword.contains(" ") { return "縮寫不能有空白" }
+        if !keyword.isEmpty, engines.keywordTaken(keyword) { return "這個縮寫已經被使用" }
+        return nil
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty && !url.isEmpty && !keyword.isEmpty && problem == nil
+    }
+
+    var body: some View {
+        Form {
+            TextField("名稱", text: $name, prompt: Text("YouTube"))
+            TextField("網址", text: $url, prompt: Text("https://www.youtube.com/results?search_query=%s"))
+            TextField("縮寫", text: $keyword, prompt: Text("yt"))
+            if let problem {
+                Text(problem).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("新增") {
+                    engines.add(name: name.trimmingCharacters(in: .whitespaces),
+                                searchURL: url.trimmingCharacters(in: .whitespaces),
+                                keyword: keyword)
+                    dismiss()
+                }
+                .disabled(!canSave)
+            }
+        }
     }
 }
 
@@ -267,6 +356,9 @@ private struct BookmarksTab: View {
 // MARK: - Cookie 與網站資料
 
 private struct WebsiteDataTab: View {
+    @ObservedObject var history: HistoryStore
+    @State private var confirmClearHistory = false
+
     private struct Site: Identifiable {
         let record: WKWebsiteDataRecord
         var id: String { record.displayName }
@@ -286,6 +378,13 @@ private struct WebsiteDataTab: View {
 
     var body: some View {
         Form {
+            Section("瀏覽紀錄") {
+                LabeledContent("\(history.entries.count) 筆") {
+                    Button("清除瀏覽紀錄…", role: .destructive) { confirmClearHistory = true }
+                        .disabled(history.entries.isEmpty)
+                }
+            }
+
             Section {
                 TextField("搜尋網站", text: $filter)
             } footer: {
@@ -333,6 +432,11 @@ private struct WebsiteDataTab: View {
         }
         .formStyle(.grouped)
         .task { await reload() }
+        .confirmationDialog("要清除所有瀏覽紀錄嗎？", isPresented: $confirmClearHistory) {
+            Button("清除瀏覽紀錄", role: .destructive) { history.clear() }
+        } message: {
+            Text("網址列就不會再用這些紀錄補全網址。")
+        }
         .confirmationDialog("要清除所有網站的 Cookie 和資料嗎？", isPresented: $confirmClearAll) {
             Button("清除全部", role: .destructive) { Task { await clearAll() } }
         } message: {

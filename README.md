@@ -23,7 +23,9 @@
 **Liquid Glass 網址列**
 - 網址列平常是隱藏的，網頁會佔滿整個面板
 - 按 ⌘L 會從底部彈出 Liquid Glass 網址列，同時列出你的收藏
-- 輸入時會即時篩選收藏，用 ↑ ↓ 選擇，Return 前往
+- 輸入時會補全網址：打「you」就補成「you**tube.com**」，按 Tab 或 → 接受，繼續打字就取消；補全依據收藏和瀏覽紀錄，越常去的網站越優先
+- 下方同時列出符合的收藏、瀏覽紀錄和搜尋引擎的建議關鍵字，用 ↑ ↓ 選擇，Return 前往
+- 預設搜尋引擎可以換成 Bing、DuckDuckGo、百度、Perplexity，也能自訂；輸入「縮寫 關鍵字」直接用指定的引擎搜尋，例如「b 天氣」用 Bing、「d 天氣」用 DuckDuckGo
 - 網址列底下有一層毛玻璃，明暗會跟著網頁走
 
 **分頁**
@@ -116,15 +118,16 @@ cd moyu-browser
 
 | 分頁 | 內容 |
 |---|---|
-| 一般 | 螢幕、貼齊邊緣、垂直位置、展開與收起延遲、手機版網頁、首頁 |
+| 一般 | 螢幕、貼齊邊緣、垂直位置、展開與收起延遲、搜尋引擎與搜尋建議、自訂搜尋引擎、手機版網頁、首頁 |
 | 外觀 | 動畫時長、回彈強度、寬度、高度、圓角、陰影強度 |
 | 快捷鍵 | 點一下就能錄製新的組合，跟其他功能重複時會提示 |
 | 收藏 | 查看、刪除、拖曳排序 |
-| Cookie | 查看哪些網站存了資料，可以逐一或全部清除 |
+| 隱私 | 清除瀏覽紀錄；查看哪些網站存了 Cookie 和資料，可以逐一或全部清除 |
 
 ## 隱私
 
-- 收藏和設定存在本機的 UserDefaults，Cookie 和網站資料存在 WebKit 的本機資料儲存區。
+- 收藏和設定存在本機的 UserDefaults，瀏覽紀錄存在 `~/Library/Application Support/MoyuBrowser/`，Cookie 和網站資料存在 WebKit 的本機資料儲存區。
+- 「搜尋建議」開著時，網址列輸入的文字會傳給目前的搜尋引擎以取得建議，跟 Safari、Chrome 一樣；可以在「設定 → 一般」關掉。
 - 沒有帳號、沒有雲端同步，也不收集任何使用資料。
 - 下載的檔案會帶上系統的隔離標記，打開來路不明的檔案時 macOS 會照常提醒你。
 
@@ -147,6 +150,10 @@ Sources/MoyuBrowser/
 ├── BrowserOverlay.swift   SwiftUI 的 Liquid Glass 介面（網址列、收藏、分頁總覽、提示、對話框）
 ├── PopupWindow.swift      登入彈窗視窗
 ├── Downloads.swift        下載管理
+├── AddressField.swift     網址列輸入框（內嵌補全）
+├── Suggestions.swift      網址補全與聯想（收藏、瀏覽紀錄、搜尋建議）
+├── SearchEngines.swift    搜尋引擎與自訂引擎
+├── History.swift          瀏覽紀錄
 ├── Bookmarks.swift        收藏
 ├── Settings.swift         設定（UserDefaults）
 ├── SettingsView.swift     設定視窗

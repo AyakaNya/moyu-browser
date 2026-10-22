@@ -54,6 +54,7 @@ final class BrowserModel: ObservableObject {
     var onOpen: (URL) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     var onToggleBookmark: () -> Void = {}
+    var onSearch: (String) -> Void = { _ in }
     var onShowOverview: () -> Void = {}
     var onDismissOverview: () -> Void = {}
     var onSelectTab: (UUID) -> Void = { _ in }
@@ -97,14 +98,19 @@ final class OverlayHostingView: NSHostingView<BrowserOverlay> {
 struct BrowserOverlay: View {
     @ObservedObject var model: BrowserModel
     @ObservedObject var bookmarks: BookmarkStore
+    @ObservedObject var suggestions: SuggestionProvider
+    @ObservedObject var engines: SearchEngineStore
 
-    @FocusState private var fieldFocused: Bool
     @State private var highlighted: Int?
 
     private let rowHeight: CGFloat = 44
 
-    private var suggestions: [Bookmark] {
-        model.queryEdited ? bookmarks.matching(model.query) : bookmarks.items
+    /// 還沒開始打字時列出收藏；打字後換成聯想結果
+    private var items: [SuggestionItem] {
+        let list = model.queryEdited
+            ? suggestions.items
+            : bookmarks.items.map { .page(title: $0.title, url: $0.url, bookmarked: true) }
+        return Array(list.prefix(50))
     }
 
     var body: some View {
@@ -147,7 +153,10 @@ struct BrowserOverlay: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.toast)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: model.dialog?.id)
         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.isOverviewVisible)
-        .onChange(of: model.query) { highlighted = nil }
+        .onChange(of: model.query) {
+            highlighted = nil
+            suggestions.update(query: model.queryEdited ? model.query : "")
+        }
     }
 
     // MARK: - 載入進度與提示
@@ -213,14 +222,12 @@ struct BrowserOverlay: View {
         return HStack(spacing: 10) {
             Image(systemName: model.queryEdited ? "magnifyingglass" : "globe")
                 .foregroundStyle(.secondary)
-            TextField("搜尋或輸入網址", text: $model.query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .focused($fieldFocused)
-                .onSubmit(submit)
-                .onExitCommand { model.onDismiss() }
-                .onKeyPress(.downArrow) { moveHighlight(1); return .handled }
-                .onKeyPress(.upArrow) { moveHighlight(-1); return .handled }
+            AddressField(text: $model.query,
+                         placeholder: "搜尋 \(engines.current.name) 或輸入網址",
+                         complete: { suggestions.inlineCompletion(for: $0) },
+                         onSubmit: submit,
+                         onMove: moveHighlight,
+                         onCancel: model.onDismiss)
             if model.isLoading {
                 ProgressView().controlSize(.small)
             }
@@ -240,59 +247,61 @@ struct BrowserOverlay: View {
         .padding(.horizontal, 18)
         .frame(height: 48)
         .glassEffect(.regular.interactive(), in: .capsule)
-        .onAppear {
-            // 輸入框要等放進視窗後才能拿焦點；拿到之後再全選，
-            // 直接對 nil 送 selectAll 會在焦點還在網頁時選到整頁
-            DispatchQueue.main.async {
-                fieldFocused = true
-                DispatchQueue.main.async {
-                    (NSApp.keyWindow?.firstResponder as? NSTextView)?.selectAll(nil)
+    }
+
+    @ViewBuilder
+    private var suggestionCard: some View {
+        let list = items
+        // 打字後沒有任何聯想就不顯示卡片
+        if !list.isEmpty || !model.queryEdited {
+            VStack(alignment: .leading, spacing: 0) {
+                if !model.queryEdited {
+                    Text("收藏")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                        .padding(.bottom, 4)
+                }
+
+                if list.isEmpty {
+                    Text("還沒有收藏，按 \(Shortcut.bookmark.keys) 收藏目前的網頁")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 14)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(list.enumerated()), id: \.element.id) { index, item in
+                                SuggestionRow(item: item, highlighted: highlighted == index)
+                                    .frame(height: rowHeight)
+                                    .onTapGesture { open(item) }
+                                    .contextMenu { contextMenu(for: item) }
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 6)
+                        .padding(.top, model.queryEdited ? 0 : -6)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(height: min(CGFloat(list.count) * rowHeight + 12, 300))
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassEffect(.regular, in: .rect(cornerRadius: 24))
         }
     }
 
-    private var suggestionCard: some View {
-        let items = Array(suggestions.prefix(50))
-        return VStack(alignment: .leading, spacing: 0) {
-            Text(model.queryEdited ? "符合的收藏" : "收藏")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 4)
-
-            if items.isEmpty {
-                Text(bookmarks.items.isEmpty ? "還沒有收藏，按 ⌘D 收藏目前的網頁" : "沒有符合的收藏，按 Return 直接前往")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 14)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, bookmark in
-                            BookmarkRow(bookmark: bookmark, highlighted: highlighted == index)
-                                .frame(height: rowHeight)
-                                .onTapGesture { open(bookmark) }
-                                .contextMenu {
-                                    Button("移除收藏", role: .destructive) { bookmarks.remove(bookmark) }
-                                }
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(height: min(CGFloat(items.count) * rowHeight + 6, 300))
-            }
+    @ViewBuilder
+    private func contextMenu(for item: SuggestionItem) -> some View {
+        if case .page(_, let url, true) = item, let bookmark = bookmarks.items.first(where: { $0.url == url }) {
+            Button("移除收藏", role: .destructive) { bookmarks.remove(bookmark) }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
     }
 
     private func moveHighlight(_ delta: Int) {
-        let count = min(suggestions.count, 50)
+        let count = items.count
         guard count > 0 else { return }
         if let current = highlighted {
             highlighted = (current + delta + count) % count
@@ -301,34 +310,58 @@ struct BrowserOverlay: View {
         }
     }
 
-    private func submit() {
-        if let index = highlighted, index < suggestions.count {
-            open(suggestions[index])
+    /// shown 是輸入框裡看到的完整文字；還留著補全時就直接開補全的網址
+    private func submit(_ shown: String) {
+        let list = items
+        if let index = highlighted, index < list.count {
+            open(list[index])
+        } else if let completion = suggestions.completion,
+                  completion.text.lowercased() == shown.lowercased(),
+                  let url = URL(string: completion.url) {
+            model.onOpen(url)
         } else {
-            model.onSubmit(model.query)
+            model.onSubmit(shown)
         }
     }
 
-    private func open(_ bookmark: Bookmark) {
-        if let url = URL(string: bookmark.url) { model.onOpen(url) }
+    private func open(_ item: SuggestionItem) {
+        switch item {
+        case .page(_, let url, _):
+            if let url = URL(string: url) { model.onOpen(url) }
+        case .search(let text):
+            model.onSearch(text)
+        }
     }
 }
 
-private struct BookmarkRow: View {
-    let bookmark: Bookmark
+/// 聯想清單的一列：網頁顯示網站縮寫圓圈、標題與網址；搜尋建議顯示放大鏡與關鍵字
+private struct SuggestionRow: View {
+    let item: SuggestionItem
     let highlighted: Bool
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(String(bookmark.title.prefix(1)).uppercased())
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(avatarColor))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(bookmark.title).font(.system(size: 13)).lineLimit(1)
-                Text(bookmark.host).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+            switch item {
+            case .page(let title, let url, _):
+                let host = URL(string: url)?.host() ?? url
+                Text(String(title.prefix(1)).uppercased())
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Self.color(for: host)))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 13)).lineLimit(1)
+                    Text(SuggestionProvider.stripped(url))
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            case .search(let text):
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                Text(text).font(.system(size: 13)).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
@@ -342,12 +375,13 @@ private struct BookmarkRow: View {
         .onHover { hovering = $0 }
     }
 
-    private var avatarColor: Color {
+    private static func color(for host: String) -> Color {
         let palette: [Color] = [.blue, .purple, .pink, .orange, .teal, .indigo, .green, .red]
-        let hash = bookmark.host.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
+        let hash = host.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
         return palette[hash % palette.count]
     }
 }
+
 
 /// 毛玻璃底：用標題列材質（給「內容捲到底下」用的），明暗由網頁決定
 private struct FrostedBackdrop: NSViewRepresentable {
