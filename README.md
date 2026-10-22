@@ -40,6 +40,18 @@
 
 ## 安裝
 
+### 下載安裝包
+
+打開 `.dmg`，把「摸魚瀏覽器」拖到「應用程式」資料夾就裝好了。安裝包同時支援 Apple Silicon 和 Intel Mac。
+
+安裝包沒有經過 Apple 公證，所以第一次打開時 macOS 會擋下來。到「系統設定 → 隱私權與安全性」，在下方找到摸魚瀏覽器，按「強制打開」就行。也可以在終端機執行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/MoyuBrowser.app
+```
+
+### 從原始碼編譯
+
 ```bash
 git clone https://github.com/AyakaNya/moyu-browser.git
 cd moyu-browser
@@ -49,6 +61,14 @@ cd moyu-browser
 `build.sh` 會用 SwiftPM 編譯 release 版，打包成 `build/MoyuBrowser.app`，並做本機 ad-hoc 簽名。加上 `--run` 會順便重新啟動 App。想長期使用的話，可以把 `MoyuBrowser.app` 拖到「應用程式」資料夾。
 
 開發時也可以直接用 Xcode 打開 `Package.swift`。
+
+### 製作安裝包
+
+```bash
+./scripts/package.sh
+```
+
+會編譯同時支援 Apple Silicon 和 Intel 的 universal 版本（需要完整的 Xcode），並在 `dist/` 產出 `MoyuBrowser-<版本>.zip` 和 `.dmg`。版本號取自 `Support/Info.plist` 的 `CFBundleShortVersionString`。
 
 ## 使用方式
 
@@ -117,6 +137,7 @@ Sources/MoyuBrowser/
 └── Debug.swift            除錯紀錄
 Support/Info.plist         App 的 Info.plist
 scripts/build.sh           編譯並打包成 .app
+scripts/package.sh         產出可發佈的 .zip 與 .dmg
 ```
 
 ## 除錯
