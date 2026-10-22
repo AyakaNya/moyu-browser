@@ -4,7 +4,7 @@ import WebKit
 
 /// 面板內容：圓角容器裡放滿版的 WKWebView，上面疊一層 Liquid Glass 介面，最上層是縮放把手。
 @MainActor
-final class BrowserView: NSView, WKUIDelegate {
+final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     static let iPhoneUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"
 
     let webView: WKWebView
@@ -25,6 +25,8 @@ final class BrowserView: NSView, WKUIDelegate {
     private var topInset: CGFloat { max(14, (cornerRadius * 0.6).rounded()) }
 
     private var observations: [NSKeyValueObservation] = []
+    private var popups: [PopupWindow] = []
+    private var isPickingFiles = false
 
     var onResize: ((CGFloat, CGFloat) -> Void)? {
         didSet { [sideHandle, edgeHandle, cornerHandle].forEach { $0.onDrag = onResize } }
@@ -32,10 +34,22 @@ final class BrowserView: NSView, WKUIDelegate {
 
     var isAddressBarVisible: Bool { model.isAddressBarVisible }
 
+    /// 正在跟使用者互動（網址列、對話框、選檔案、登入彈窗），面板不該自動收起
+    var isBusy: Bool {
+        model.isAddressBarVisible || model.dialog != nil || isPickingFiles || !popups.isEmpty
+    }
+
+    var hasDialog: Bool { model.dialog != nil }
+
+    /// 網頁需要使用者回應（例如跳出對話框）時，請面板展開
+    var onNeedsAttention: (() -> Void)?
+
     override init(frame frameRect: NSRect) {
         let config = WKWebViewConfiguration()
         // 預設的資料儲存區會把 Cookie、登入狀態等寫進磁碟，重開 App 仍保留
         config.websiteDataStore = .default()
+        // 預設的 User-Agent 沒有 Safari 字樣，Google 等網站會擋登入，所以補上
+        config.applicationNameForUserAgent = "Version/18.5 Safari/605.1.15"
         webView = WKWebView(frame: .zero, configuration: config)
         overlay = OverlayHostingView(rootView: BrowserOverlay(model: model, bookmarks: BookmarkStore.shared))
         super.init(frame: frameRect)
@@ -65,12 +79,16 @@ final class BrowserView: NSView, WKUIDelegate {
 
     private func setupSubviews() {
         webView.uiDelegate = self
+        webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
         webView.autoresizingMask = [.width, .height]
         addSubview(webView)
 
-        overlay.isInteractive = { [weak self] in self?.model.isAddressBarVisible ?? false }
+        overlay.isInteractive = { [weak self] in
+            guard let self else { return false }
+            return model.isAddressBarVisible || model.dialog != nil
+        }
         // 不讓 SwiftUI 內容反過來限制面板大小
         overlay.sizingOptions = []
         overlay.autoresizingMask = [.width, .height]
@@ -117,6 +135,11 @@ final class BrowserView: NSView, WKUIDelegate {
         model.onOpen = { [weak self] url in self?.open(url) }
         model.onDismiss = { [weak self] in self?.hideAddressBar() }
         model.onToggleBookmark = { [weak self] in self?.toggleBookmark() }
+        DownloadManager.shared.onEvent = { [weak self] text, symbol in self?.showToast(text, symbol: symbol) }
+    }
+
+    func finishDialog(confirmed: Bool) {
+        model.finishDialog(confirmed: confirmed)
     }
 
     // MARK: - 網址列
@@ -250,13 +273,111 @@ final class BrowserView: NSView, WKUIDelegate {
         needsDisplay = true
     }
 
-    // 開新視窗的連結（target=_blank）直接在目前頁面打開
+    // MARK: - 彈窗
+
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if navigationAction.targetFrame == nil {
+        // 一般 target=_blank 連結直接在目前頁面打開；
+        // 網頁用 window.open 指定大小開的（多半是 OAuth 登入）才開獨立視窗
+        let isPlainLink = navigationAction.navigationType == .linkActivated && windowFeatures.width == nil
+        if isPlainLink {
             webView.load(navigationAction.request)
+            return nil
         }
-        return nil
+        let popup = PopupWindow(configuration: configuration, features: windowFeatures,
+                                userAgent: webView.customUserAgent,
+                                centeredOn: window?.frame ?? .zero)
+        popup.onClose = { [weak self] closed in
+            self?.popups.removeAll { $0 === closed }
+            self?.window?.makeKey()
+        }
+        popups.append(popup)
+        popup.show()
+        return popup.webView
+    }
+
+    // MARK: - JS 對話框
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo) async {
+        _ = await presentDialog(.alert, message: message, frame: frame)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo) async -> Bool {
+        await presentDialog(.confirm, message: message, frame: frame).confirmed
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo) async -> String? {
+        await presentDialog(.prompt, message: prompt, defaultText: defaultText ?? "", frame: frame).text
+    }
+
+    private func presentDialog(_ kind: BrowserModel.Dialog.Kind, message: String, defaultText: String = "",
+                               frame: WKFrameInfo) async -> (confirmed: Bool, text: String?) {
+        // 面板收著時先展開，不然使用者看不到對話框
+        onNeedsAttention?()
+        hideAddressBar()
+        model.dialogText = defaultText
+        return await withCheckedContinuation { continuation in
+            model.dialog = BrowserModel.Dialog(kind: kind, host: frame.securityOrigin.host, message: message) {
+                continuation.resume(returning: ($0, $1))
+            }
+            window?.makeKey()
+        }
+    }
+
+    // MARK: - 檔案上傳
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo) async -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.canChooseFiles = true
+        panel.prompt = "上傳"
+        // 要蓋在浮動面板上面
+        panel.level = .modalPanel
+
+        isPickingFiles = true
+        let previousApp = NSWorkspace.shared.frontmostApplication
+        NSApp.activate()
+        let response = await panel.begin()
+        isPickingFiles = false
+        // 選完檔案回到原本在用的 App，面板保持可輸入
+        if let previousApp, previousApp != NSRunningApplication.current { previousApp.activate() }
+        window?.makeKey()
+        return response == .OK ? panel.urls : nil
+    }
+
+    // MARK: - 下載
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+        navigationAction.shouldPerformDownload ? .download : .allow
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
+        let disposition = (navigationResponse.response as? HTTPURLResponse)?
+            .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+        if !navigationResponse.canShowMIMEType || (navigationResponse.isForMainFrame && disposition.hasPrefix("attachment")) {
+            return .download
+        }
+        return .allow
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        download.delegate = DownloadManager.shared
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        download.delegate = DownloadManager.shared
+    }
+
+    // MARK: - 網頁當掉
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        showToast("網頁意外結束，重新載入中", symbol: "arrow.clockwise")
+        webView.reload()
     }
 }
 

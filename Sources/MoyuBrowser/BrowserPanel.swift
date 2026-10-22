@@ -105,9 +105,20 @@ final class BrowserPanel: NSPanel {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let keyCode = Int(event.keyCode)
 
-        // Esc 收回網址列；正在用輸入法組字時先讓輸入法處理
+        let composing = (firstResponder as? NSTextView)?.hasMarkedText() == true
+
+        // 網頁對話框：Return 確定、Esc 取消；正在用輸入法組字時先讓輸入法處理
+        if browser.hasDialog, !composing {
+            switch keyCode {
+            case kVK_Return, kVK_ANSI_KeypadEnter: browser.finishDialog(confirmed: true); return true
+            case kVK_Escape: browser.finishDialog(confirmed: false); return true
+            default: break
+            }
+        }
+
+        // Esc 收回網址列
         if keyCode == kVK_Escape, browser.isAddressBarVisible {
-            if (firstResponder as? NSTextView)?.hasMarkedText() == true { return false }
+            if composing { return false }
             browser.hideAddressBar()
             return true
         }

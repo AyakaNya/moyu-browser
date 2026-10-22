@@ -10,6 +10,16 @@ final class BrowserModel: ObservableObject {
         let symbol: String
     }
 
+    /// 網頁呼叫 alert / confirm / prompt 時顯示的對話框
+    struct Dialog: Identifiable {
+        enum Kind { case alert, confirm, prompt }
+        let id = UUID()
+        let kind: Kind
+        let host: String
+        let message: String
+        let finish: (_ confirmed: Bool, _ text: String?) -> Void
+    }
+
     @Published var isAddressBarVisible = false
     @Published var query = ""
     /// 叫出網址列時填入的原始網址；query 跟它不同就代表使用者開始輸入了
@@ -20,6 +30,8 @@ final class BrowserModel: ObservableObject {
     @Published var toast: Toast?
     /// 網頁是深色的嗎；網址列和底下的毛玻璃跟著網頁明暗走，而不是跟系統
     @Published var pageIsDark = false
+    @Published var dialog: Dialog?
+    @Published var dialogText = ""
 
     var queryEdited: Bool { query != originalQuery }
 
@@ -27,6 +39,13 @@ final class BrowserModel: ObservableObject {
     var onOpen: (URL) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     var onToggleBookmark: () -> Void = {}
+
+    /// 關掉對話框並把結果回傳給網頁；每個對話框只會回傳一次
+    func finishDialog(confirmed: Bool) {
+        guard let dialog else { return }
+        self.dialog = nil
+        dialog.finish(confirmed, confirmed ? dialogText : nil)
+    }
 
     func showToast(_ text: String, symbol: String) {
         let toast = Toast(text: text, symbol: symbol)
@@ -78,6 +97,15 @@ struct BrowserOverlay: View {
                     .transition(.opacity)
             }
 
+            if let dialog = model.dialog {
+                Color.black.opacity(0.08)
+                    .transition(.opacity)
+                DialogCard(model: model, dialog: dialog)
+                    .environment(\.colorScheme, model.pageIsDark ? .dark : .light)
+                    .transition(.scale(scale: 0.9).combined(with: .opacity))
+                    .zIndex(1)
+            }
+
             VStack(spacing: 0) {
                 progressBar
                 toastView
@@ -90,6 +118,7 @@ struct BrowserOverlay: View {
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.isAddressBarVisible)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.toast)
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: model.dialog?.id)
         .onChange(of: model.query) { highlighted = nil }
     }
 
@@ -299,5 +328,57 @@ private struct FrostedBackdrop: NSViewRepresentable {
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
         view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    }
+}
+
+/// Liquid Glass 樣式的 alert / confirm / prompt
+private struct DialogCard: View {
+    @ObservedObject var model: BrowserModel
+    let dialog: BrowserModel.Dialog
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(dialog.host.isEmpty ? "網頁訊息" : dialog.host)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Text(dialog.message)
+                    .font(.system(size: 14))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .textSelection(.enabled)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxHeight: 220)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if dialog.kind == .prompt {
+                TextField("", text: $model.dialogText)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                    .focused($fieldFocused)
+                    .onAppear { DispatchQueue.main.async { fieldFocused = true } }
+            }
+
+            HStack(spacing: 10) {
+                if dialog.kind != .alert {
+                    Button("取消") { model.finishDialog(confirmed: false) }
+                        .buttonStyle(.glass)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                }
+                Button("好") { model.finishDialog(confirmed: true) }
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: 300)
+        .glassEffect(.regular, in: .rect(cornerRadius: 28))
+        .padding(24)
     }
 }

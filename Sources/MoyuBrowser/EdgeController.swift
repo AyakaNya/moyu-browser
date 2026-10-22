@@ -49,6 +49,7 @@ final class EdgeController {
         panel.browser.onResize = { [weak self] dx, dy in self?.resize(dx: dx, dy: dy) }
         panel.onTogglePin = { [weak self] in self?.isPinned.toggle() }
         panel.onCollapse = { [weak self] in self?.collapse(suppress: true) }
+        panel.browser.onNeedsAttention = { [weak self] in self?.expand(manual: true) }
 
         let center = NotificationCenter.default
         center.addObserver(forName: .settingsDidChange, object: nil, queue: .main) { [weak self] _ in
@@ -191,7 +192,7 @@ final class EdgeController {
         case .expanding, .expanded:
             let inside = expandedFrame().insetBy(dx: -hoverTolerance, dy: -hoverTolerance).contains(mouse) || inTrigger
             if inside { awaitingHover = false }
-            let editing = panel.browser.isAddressBarVisible
+            let editing = panel.browser.isBusy
             let hold = inside || isPinned || awaitingHover || editing || NSEvent.pressedMouseButtons != 0
             if hold {
                 debugLog("hold inside=\(inside) pinned=\(isPinned) awaiting=\(awaitingHover) editing=\(editing) buttons=\(NSEvent.pressedMouseButtons)")

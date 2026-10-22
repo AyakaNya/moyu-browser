@@ -20,6 +20,8 @@
     <string>26.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSFileQuarantineEnabled</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>

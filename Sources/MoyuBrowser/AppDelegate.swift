@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(submenu("收藏", bookmarkMenu()))
+        menu.addItem(submenu("下載", downloadMenu()))
         menu.addItem(submenu("螢幕", screenMenu()))
         menu.addItem(submenu("位置", positionMenu()))
         menu.addItem(submenu("快捷鍵", shortcutMenu()))
@@ -52,6 +53,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.toolTip = bookmark.url
             menu.addItem(entry)
         }
+        return menu
+    }
+
+    private func downloadMenu() -> NSMenu {
+        let menu = NSMenu()
+        let recent = DownloadManager.shared.recent
+        if recent.isEmpty {
+            let empty = NSMenuItem(title: "這次還沒有下載", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+        for url in recent {
+            let entry = item(url.lastPathComponent, #selector(revealDownload(_:)))
+            entry.representedObject = url
+            entry.toolTip = "在 Finder 中顯示"
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("打開「下載項目」資料夾", #selector(openDownloadsFolder)))
         return menu
     }
 
@@ -119,6 +139,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let url = sender.representedObject as? String else { return }
         controller.panel.browser.open(urlString: url)
         controller.expand(manual: true)
+    }
+
+    @objc private func revealDownload(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    @objc private func openDownloadsFolder() {
+        NSWorkspace.shared.open(DownloadManager.folder)
     }
 
     @objc private func chooseScreen(_ sender: NSMenuItem) {
