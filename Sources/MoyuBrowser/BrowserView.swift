@@ -2,15 +2,23 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// 面板內容：圓角容器裡放滿版的 WKWebView，上面疊一層 Liquid Glass 介面，最上層是縮放把手。
+/// 面板內容：圓角容器裡放目前分頁的 WKWebView，上面疊一層 Liquid Glass 介面，最上層是縮放把手。
 @MainActor
 final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     static let iPhoneUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1"
 
-    let webView: WKWebView
     private let model = BrowserModel()
     private let bookmarks = BookmarkStore.shared
     private let overlay: OverlayHostingView
+    /// 放目前分頁網頁的容器，切換分頁時在這裡做推移轉場
+    private let pageContainer = NSView()
+
+    private var tabs: [Tab] = []
+    private var currentIndex = 0
+    /// 關掉的分頁網址，⌘⇧T 依序重新打開
+    private var closedTabURLs: [URL] = []
+
+    var webView: WKWebView { tabs[currentIndex].webView }
 
     private let sideHandle = ResizeHandle(axis: .horizontal)
     private let edgeHandle = ResizeHandle(axis: .vertical)
@@ -28,15 +36,24 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     private var popups: [PopupWindow] = []
     private var isPickingFiles = false
 
+    /// 網址列附近的觸控板手勢：左右滑切換分頁、往上滑打開分頁總覽。
+    /// 記錄這次手勢累積的手指位移、判定的方向，以及是否已經觸發過
+    private enum SwipeAxis { case horizontal, vertical }
+    private var swipeOffset = CGSize.zero
+    private var swipeAxis: SwipeAxis?
+    private var swipeHandled = false
+
     var onResize: ((CGFloat, CGFloat) -> Void)? {
         didSet { [sideHandle, edgeHandle, cornerHandle].forEach { $0.onDrag = onResize } }
     }
 
     var isAddressBarVisible: Bool { model.isAddressBarVisible }
+    var isOverviewVisible: Bool { model.isOverviewVisible }
 
-    /// 正在跟使用者互動（網址列、對話框、選檔案、登入彈窗），面板不該自動收起
+    /// 正在跟使用者互動（網址列、分頁總覽、對話框、選檔案、登入彈窗），面板不該自動收起
     var isBusy: Bool {
-        model.isAddressBarVisible || model.dialog != nil || isPickingFiles || !popups.isEmpty
+        model.isAddressBarVisible || model.isOverviewVisible || model.dialog != nil
+            || isPickingFiles || !popups.isEmpty
     }
 
     var hasDialog: Bool { model.dialog != nil }
@@ -45,12 +62,6 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     var onNeedsAttention: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
-        let config = WKWebViewConfiguration()
-        // 預設的資料儲存區會把 Cookie、登入狀態等寫進磁碟，重開 App 仍保留
-        config.websiteDataStore = .default()
-        // 預設的 User-Agent 沒有 Safari 字樣，Google 等網站會擋登入，所以補上
-        config.applicationNameForUserAgent = "Version/18.5 Safari/605.1.15"
-        webView = WKWebView(frame: .zero, configuration: config)
         overlay = OverlayHostingView(rootView: BrowserOverlay(model: model, bookmarks: BookmarkStore.shared))
         super.init(frame: frameRect)
 
@@ -61,7 +72,7 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
 
         setupSubviews()
         bindModel()
-        observeWebView()
+        restoreTabs()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -78,16 +89,12 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     // MARK: - 版面
 
     private func setupSubviews() {
-        webView.uiDelegate = self
-        webView.navigationDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-        webView.allowsMagnification = true
-        webView.autoresizingMask = [.width, .height]
-        addSubview(webView)
+        pageContainer.wantsLayer = true
+        addSubview(pageContainer)
 
         overlay.isInteractive = { [weak self] in
             guard let self else { return false }
-            return model.isAddressBarVisible || model.dialog != nil
+            return model.isAddressBarVisible || model.isOverviewVisible || model.dialog != nil
         }
         // 不讓 SwiftUI 內容反過來限制面板大小
         overlay.sizingOptions = []
@@ -109,8 +116,10 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
     override func layout() {
         super.layout()
         let b = bounds
-        webView.frame = NSRect(x: 0, y: 0, width: b.width, height: max(b.height - topInset, 0))
+        pageContainer.frame = NSRect(x: 0, y: 0, width: b.width, height: max(b.height - topInset, 0))
+        webView.frame = pageContainer.bounds
         overlay.frame = b
+        if model.topInset != topInset { model.topInset = topInset }
 
         let thickness: CGFloat = 6
         let corner: CGFloat = 14
@@ -135,6 +144,15 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         model.onOpen = { [weak self] url in self?.open(url) }
         model.onDismiss = { [weak self] in self?.hideAddressBar() }
         model.onToggleBookmark = { [weak self] in self?.toggleBookmark() }
+        model.onShowOverview = { [weak self] in self?.showOverview() }
+        model.onDismissOverview = { [weak self] in self?.hideOverview() }
+        model.onSelectTab = { [weak self] id in
+            guard let self, let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+            select(index)
+            hideOverview()
+        }
+        model.onCloseTab = { [weak self] id in self?.closeTab(id: id) }
+        model.onNewTab = { [weak self] in self?.newTab() }
         DownloadManager.shared.onEvent = { [weak self] text, symbol in self?.showToast(text, symbol: symbol) }
     }
 
@@ -142,17 +160,224 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         model.finishDialog(confirmed: confirmed)
     }
 
+    // MARK: - 分頁
+
+    private func makeTab(url: URL? = nil) -> Tab {
+        let configuration = WKWebViewConfiguration()
+        // 預設的資料儲存區會把 Cookie、登入狀態等寫進磁碟，重開 App 仍保留；所有分頁共用
+        configuration.websiteDataStore = .default()
+        // 預設的 User-Agent 沒有 Safari 字樣，Google 等網站會擋登入，所以補上
+        configuration.applicationNameForUserAgent = "Version/18.5 Safari/605.1.15"
+        let tab = Tab(configuration: configuration)
+        tab.webView.uiDelegate = self
+        tab.webView.navigationDelegate = self
+        tab.webView.customUserAgent = Settings.shared.mobileUserAgent ? Self.iPhoneUserAgent : nil
+        tab.pendingURL = url
+        tab.onChange = { [weak self] in self?.tabsDidChange() }
+        return tab
+    }
+
+    /// 還原上次開著的分頁；只有目前分頁會在 loadInitialPage() 時載入
+    private func restoreTabs() {
+        let settings = Settings.shared
+        var urls = settings.savedTabs.compactMap(Self.url(from:))
+        if urls.isEmpty, let home = Self.url(from: settings.homeURL) { urls = [home] }
+        tabs = urls.map { makeTab(url: $0) }
+        if tabs.isEmpty { tabs = [makeTab()] }
+        currentIndex = min(max(settings.savedTabIndex, 0), tabs.count - 1)
+        pageContainer.addSubview(webView)
+        observeCurrentTab()
+    }
+
+    func loadInitialPage() {
+        tabs[currentIndex].loadIfNeeded()
+        tabsDidChange()
+    }
+
+    private enum Push { case fromLeft, fromRight }
+
+    private func select(_ index: Int, push: Push? = nil) {
+        guard tabs.indices.contains(index) else { return }
+        let incoming = tabs[index]
+        guard incoming.webView.superview == nil else { return }
+
+        pageContainer.subviews.forEach { $0.removeFromSuperview() }
+        currentIndex = index
+        incoming.webView.frame = pageContainer.bounds
+        if let push {
+            let transition = CATransition()
+            transition.type = .push
+            transition.subtype = push == .fromRight ? .fromRight : .fromLeft
+            transition.duration = 0.28
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            pageContainer.layer?.add(transition, forKey: "switchTab")
+        }
+        pageContainer.addSubview(incoming.webView)
+        incoming.loadIfNeeded()
+        observeCurrentTab()
+        updatePageColor()
+
+        if model.isAddressBarVisible {
+            fillAddressBar()
+        } else {
+            window?.makeFirstResponder(incoming.webView)
+        }
+        tabsDidChange()
+    }
+
+    /// 切到前一個或後一個分頁；快捷鍵會繞回頭尾，滑動手勢不會
+    func selectTab(offset: Int, wrap: Bool = true) {
+        guard tabs.count > 1 else { return }
+        var target = currentIndex + offset
+        if wrap {
+            target = (target + tabs.count) % tabs.count
+        } else if !tabs.indices.contains(target) {
+            return
+        }
+        select(target, push: offset > 0 ? .fromRight : .fromLeft)
+    }
+
+    /// ⌘1～⌘8 切到第幾個分頁，⌘9 切到最後一個
+    func selectTab(number: Int) {
+        let target = number == 9 ? tabs.count - 1 : number - 1
+        guard target != currentIndex else { return }
+        select(target, push: target > currentIndex ? .fromRight : .fromLeft)
+    }
+
+    @discardableResult
+    func newTab(url: URL? = nil, showAddressBar: Bool = true) -> Tab {
+        let tab = makeTab(url: url ?? Self.url(from: Settings.shared.homeURL))
+        tabs.insert(tab, at: currentIndex + 1)
+        hideOverview()
+        select(currentIndex + 1, push: .fromRight)
+        if showAddressBar { self.showAddressBar() }
+        return tab
+    }
+
+    func closeCurrentTab() {
+        closeTab(id: tabs[currentIndex].id)
+    }
+
+    private func closeTab(id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        let tab = tabs[index]
+        if let url = tab.url { closedTabURLs.append(url) }
+        tab.webView.stopLoading()
+        tab.webView.removeFromSuperview()
+        tabs.remove(at: index)
+
+        // 關掉最後一個分頁時，留一個首頁分頁
+        if tabs.isEmpty { tabs = [makeTab(url: Self.url(from: Settings.shared.homeURL))] }
+        if index < currentIndex || currentIndex >= tabs.count {
+            currentIndex = max(currentIndex - 1, 0)
+        }
+        if pageContainer.subviews.isEmpty {
+            select(min(index, tabs.count - 1), push: model.isOverviewVisible ? nil : .fromRight)
+        } else {
+            tabsDidChange()
+        }
+    }
+
+    func reopenClosedTab() {
+        guard let url = closedTabURLs.popLast() else { return }
+        newTab(url: url, showAddressBar: false)
+    }
+
+    /// 分頁有變動時更新總覽並保存，重開 App 可以還原
+    private func tabsDidChange() {
+        model.tabs = tabs.map { BrowserModel.TabItem(id: $0.id, title: $0.title, host: $0.url?.host() ?? "", snapshot: $0.snapshot) }
+        model.currentTabID = tabs[currentIndex].id
+        model.currentURL = webView.url
+        let settings = Settings.shared
+        settings.savedTabs = tabs.compactMap { $0.url?.absoluteString }
+        settings.savedTabIndex = currentIndex
+    }
+
+    // MARK: - 分頁總覽
+
+    func showOverview() {
+        hideAddressBar()
+        let tab = tabs[currentIndex]
+        Task {
+            await tab.updateSnapshot()
+            // 背景要用原尺寸的快照，動畫開頭還沒模糊時才會跟網頁本身一模一樣
+            model.overviewBackdrop = try? await tab.webView.takeSnapshot(configuration: nil)
+            tabsDidChange()
+            model.isOverviewVisible = true
+            window?.makeKey()
+        }
+    }
+
+    func hideOverview() {
+        guard model.isOverviewVisible else { return }
+        model.isOverviewVisible = false
+        window?.makeFirstResponder(webView)
+    }
+
+    func toggleOverview() {
+        if model.isOverviewVisible { hideOverview() } else { showOverview() }
+    }
+
+    /// 網址列開著時，在面板下方用觸控板左右滑動切換分頁、往上滑打開分頁總覽。回傳 true 代表事件已處理
+    func handleSwipe(_ event: NSEvent) -> Bool {
+        guard model.isAddressBarVisible else { return false }
+        guard convert(event.locationInWindow, from: nil).y < 140 else { return false }
+        // 滑鼠滾輪沒有手勢階段，不算
+        guard event.phase != [] || event.momentumPhase != [] else { return false }
+        if event.phase == .began {
+            swipeOffset = .zero
+            swipeAxis = nil
+            swipeHandled = false
+        }
+        // 手指離開後的慣性捲動不算
+        if event.momentumPhase != [] { return true }
+
+        // 換算成手指實際移動的方向，不受「自然捲動」設定影響：正值代表往右、往上
+        let natural = event.isDirectionInvertedFromDevice
+        swipeOffset.width += natural ? event.scrollingDeltaX : -event.scrollingDeltaX
+        swipeOffset.height += natural ? -event.scrollingDeltaY : event.scrollingDeltaY
+
+        // 先看手指主要往哪個方向動，同一次手勢只做一種事
+        if swipeAxis == nil, max(abs(swipeOffset.width), abs(swipeOffset.height)) > 8 {
+            swipeAxis = abs(swipeOffset.width) > abs(swipeOffset.height) ? .horizontal : .vertical
+        }
+        if !swipeHandled {
+            switch swipeAxis {
+            case .horizontal where abs(swipeOffset.width) > 40 && tabs.count > 1:
+                swipeHandled = true
+                // 手指往右滑看前一個分頁，跟翻頁的方向一致
+                selectTab(offset: swipeOffset.width > 0 ? -1 : 1, wrap: false)
+            case .vertical where swipeOffset.height > 50:
+                swipeHandled = true
+                showOverview()
+            default:
+                break
+            }
+        }
+        if event.phase == .ended || event.phase == .cancelled {
+            swipeOffset = .zero
+            swipeAxis = nil
+            swipeHandled = false
+        }
+        return true
+    }
+
     // MARK: - 網址列
 
     func showAddressBar() {
-        let current = webView.url?.absoluteString ?? ""
-        model.originalQuery = current
-        model.query = current
+        fillAddressBar()
         if model.isAddressBarVisible {
             (window?.firstResponder as? NSTextView)?.selectAll(nil)
         }
         model.isAddressBarVisible = true
         window?.makeKey()
+    }
+
+    private func fillAddressBar() {
+        let current = webView.url?.absoluteString ?? tabs[currentIndex].pendingURL?.absoluteString ?? ""
+        model.originalQuery = current
+        model.query = current
+        (window?.firstResponder as? NSTextView)?.selectAll(nil)
     }
 
     func hideAddressBar() {
@@ -211,18 +436,13 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         if let url = Self.url(from: urlString) { open(url) }
     }
 
-    func loadInitialPage() {
-        let settings = Settings.shared
-        if let url = Self.url(from: settings.lastURL ?? settings.homeURL) {
-            webView.load(URLRequest(url: url))
-        }
-    }
-
     func applyUserAgent(mobile: Bool) {
         let agent = mobile ? Self.iPhoneUserAgent : nil
-        guard webView.customUserAgent != agent else { return }
-        webView.customUserAgent = agent
-        if webView.url != nil { webView.reload() }
+        for tab in tabs where tab.webView.customUserAgent != agent {
+            tab.webView.customUserAgent = agent
+            // 背景分頁等下次載入時才會用到新的 User-Agent
+            if tab.webView === webView, tab.webView.url != nil { tab.webView.reload() }
+        }
     }
 
     /// 有網址格式就直接開，否則當作關鍵字丟給 Google
@@ -241,18 +461,13 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         return components.url
     }
 
-    private func observeWebView() {
+    /// 載入進度、主題色只看目前分頁
+    private func observeCurrentTab() {
         observations = [
-            webView.observe(\.url) { [weak self] webView, _ in
-                MainActor.assumeIsolated {
-                    self?.model.currentURL = webView.url
-                    if let url = webView.url { Settings.shared.lastURL = url.absoluteString }
-                }
-            },
-            webView.observe(\.estimatedProgress) { [weak self] webView, _ in
+            webView.observe(\.estimatedProgress, options: [.initial]) { [weak self] webView, _ in
                 MainActor.assumeIsolated { self?.model.progress = webView.estimatedProgress }
             },
-            webView.observe(\.isLoading) { [weak self] webView, _ in
+            webView.observe(\.isLoading, options: [.initial]) { [weak self] webView, _ in
                 MainActor.assumeIsolated { self?.model.isLoading = webView.isLoading }
             },
             webView.observe(\.themeColor) { [weak self] _, _ in
@@ -273,15 +488,24 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
         needsDisplay = true
     }
 
+    // 目前分頁載入完就更新縮圖，分頁總覽才有最新畫面
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let tab = tabs.first(where: { $0.webView === webView }), webView === self.webView else { return }
+        Task {
+            await tab.updateSnapshot()
+            tabsDidChange()
+        }
+    }
+
     // MARK: - 彈窗
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // 一般 target=_blank 連結直接在目前頁面打開；
+        // 一般 target=_blank 連結開在新分頁；
         // 網頁用 window.open 指定大小開的（多半是 OAuth 登入）才開獨立視窗
         let isPlainLink = navigationAction.navigationType == .linkActivated && windowFeatures.width == nil
         if isPlainLink {
-            webView.load(navigationAction.request)
+            newTab(showAddressBar: false).webView.load(navigationAction.request)
             return nil
         }
         let popup = PopupWindow(configuration: configuration, features: windowFeatures,
@@ -300,24 +524,28 @@ final class BrowserView: NSView, WKUIDelegate, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo) async {
-        _ = await presentDialog(.alert, message: message, frame: frame)
+        _ = await presentDialog(.alert, message: message, frame: frame, in: webView)
     }
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo) async -> Bool {
-        await presentDialog(.confirm, message: message, frame: frame).confirmed
+        await presentDialog(.confirm, message: message, frame: frame, in: webView).confirmed
     }
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
                  defaultText: String?, initiatedByFrame frame: WKFrameInfo) async -> String? {
-        await presentDialog(.prompt, message: prompt, defaultText: defaultText ?? "", frame: frame).text
+        await presentDialog(.prompt, message: prompt, defaultText: defaultText ?? "", frame: frame, in: webView).text
     }
 
     private func presentDialog(_ kind: BrowserModel.Dialog.Kind, message: String, defaultText: String = "",
-                               frame: WKFrameInfo) async -> (confirmed: Bool, text: String?) {
-        // 面板收著時先展開，不然使用者看不到對話框
+                               frame: WKFrameInfo, in source: WKWebView) async -> (confirmed: Bool, text: String?) {
+        // 面板收著時先展開，背景分頁跳出的就先切過去，不然使用者看不到對話框
         onNeedsAttention?()
+        if let index = tabs.firstIndex(where: { $0.webView === source }), index != currentIndex {
+            select(index)
+        }
         hideAddressBar()
+        hideOverview()
         model.dialogText = defaultText
         return await withCheckedContinuation { continuation in
             model.dialog = BrowserModel.Dialog(kind: kind, host: frame.securityOrigin.host, message: message) {

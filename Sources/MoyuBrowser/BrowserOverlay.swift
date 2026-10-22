@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 網頁上方那層 SwiftUI 介面（網址列、收藏建議、載入進度、提示訊息）的狀態
+/// 網頁上方那層 SwiftUI 介面（網址列、收藏建議、分頁總覽、載入進度、提示訊息）的狀態
 @MainActor
 final class BrowserModel: ObservableObject {
     struct Toast: Equatable, Identifiable {
@@ -20,7 +20,22 @@ final class BrowserModel: ObservableObject {
         let finish: (_ confirmed: Bool, _ text: String?) -> Void
     }
 
+    /// 分頁總覽要顯示的內容
+    struct TabItem: Identifiable {
+        let id: UUID
+        let title: String
+        let host: String
+        let snapshot: NSImage?
+    }
+
     @Published var isAddressBarVisible = false
+    @Published var isOverviewVisible = false
+    @Published var tabs: [TabItem] = []
+    @Published var currentTabID: UUID?
+    /// 網頁上方留白的高度，分頁總覽的模糊背景要跟網頁對齊
+    @Published var topInset: CGFloat = 0
+    /// 打開分頁總覽時拍的目前分頁原尺寸快照，當總覽的模糊背景
+    @Published var overviewBackdrop: NSImage?
     @Published var query = ""
     /// 叫出網址列時填入的原始網址；query 跟它不同就代表使用者開始輸入了
     @Published var originalQuery = ""
@@ -39,6 +54,11 @@ final class BrowserModel: ObservableObject {
     var onOpen: (URL) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     var onToggleBookmark: () -> Void = {}
+    var onShowOverview: () -> Void = {}
+    var onDismissOverview: () -> Void = {}
+    var onSelectTab: (UUID) -> Void = { _ in }
+    var onCloseTab: (UUID) -> Void = { _ in }
+    var onNewTab: () -> Void = {}
 
     /// 關掉對話框並把結果回傳給網頁；每個對話框只會回傳一次
     func finishDialog(confirmed: Bool) {
@@ -97,6 +117,13 @@ struct BrowserOverlay: View {
                     .transition(.opacity)
             }
 
+            if model.isOverviewVisible {
+                TabOverview(model: model)
+                    .environment(\.colorScheme, model.pageIsDark ? .dark : .light)
+                    // 出現的動畫在 TabOverview 裡自己做；這裡只負責收起時反向模糊淡出
+                    .transition(.asymmetric(insertion: .identity, removal: .blurReveal))
+            }
+
             if let dialog = model.dialog {
                 Color.black.opacity(0.08)
                     .transition(.opacity)
@@ -119,6 +146,7 @@ struct BrowserOverlay: View {
         .animation(.spring(response: 0.42, dampingFraction: 0.78), value: model.isAddressBarVisible)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.toast)
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: model.dialog?.id)
+        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: model.isOverviewVisible)
         .onChange(of: model.query) { highlighted = nil }
     }
 
@@ -156,6 +184,7 @@ struct BrowserOverlay: View {
         GlassEffectContainer(spacing: 10) {
             VStack(spacing: 10) {
                 suggestionCard
+                if model.tabs.count > 1 { TabDots(model: model) }
                 addressCapsule
             }
         }
@@ -200,7 +229,13 @@ struct BrowserOverlay: View {
                     .foregroundStyle(isBookmarked ? Color.yellow : Color.secondary)
             }
             .buttonStyle(.plain)
-            .help("收藏目前的網頁（⌘D）")
+            .help(Shortcut.bookmark.help)
+            Button(action: model.onShowOverview) {
+                Image(systemName: "square.on.square")
+                    .foregroundStyle(Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(Shortcut.overview.help)
         }
         .padding(.horizontal, 18)
         .frame(height: 48)
@@ -380,5 +415,171 @@ private struct DialogCard: View {
         .frame(maxWidth: 300)
         .glassEffect(.regular, in: .rect(cornerRadius: 28))
         .padding(24)
+    }
+}
+
+/// 網址列上方的分頁位置點，目前分頁拉長；點一下切過去
+private struct TabDots: View {
+    @ObservedObject var model: BrowserModel
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(model.tabs) { tab in
+                let current = tab.id == model.currentTabID
+                Capsule()
+                    .fill(Color.primary.opacity(current ? 0.7 : 0.25))
+                    .frame(width: current ? 16 : 6, height: 6)
+                    .contentShape(Rectangle().inset(by: -4))
+                    .onTapGesture { model.onSelectTab(tab.id) }
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: model.currentTabID)
+    }
+}
+
+/// 分頁總覽：所有分頁的縮圖排成格狀，最後一格新增分頁。
+/// 出現時背景的網頁從清晰變得輕微模糊，卡片從模糊變清晰、淡入並往上浮，像從網址列冒出來。
+private struct TabOverview: View {
+    @ObservedObject var model: BrowserModel
+    @State private var revealed = false
+
+    private var currentSnapshot: NSImage? {
+        model.overviewBackdrop ?? model.tabs.first { $0.id == model.currentTabID }?.snapshot
+    }
+
+    var body: some View {
+        ZStack {
+            backdrop
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 14)], spacing: 18) {
+                    ForEach(Array(model.tabs.enumerated()), id: \.element.id) { index, tab in
+                        TabCard(tab: tab, isCurrent: tab.id == model.currentTabID,
+                                onSelect: { model.onSelectTab(tab.id) },
+                                onClose: { model.onCloseTab(tab.id) })
+                            .modifier(BlurReveal(hidden: !revealed))
+                            .animation(Self.reveal.delay(Double(index) * 0.035), value: revealed)
+                    }
+                    Button(action: model.onNewTab) {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.18), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                            .aspectRatio(3 / 4, contentMode: .fit)
+                            .overlay(Image(systemName: "plus").font(.title2).foregroundStyle(.secondary))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(Shortcut.newTab.help)
+                    .modifier(BlurReveal(hidden: !revealed))
+                    .animation(Self.reveal.delay(Double(model.tabs.count) * 0.035), value: revealed)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 30)
+                .padding(.bottom, 20)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.onDismissOverview() }
+        .onAppear { revealed = true }
+    }
+
+    private static let reveal = Animation.spring(response: 0.5, dampingFraction: 0.86)
+
+    /// 目前分頁的快照放在跟網頁一樣的位置，模糊度從 0 開始，看起來就是網頁本身慢慢變模糊
+    private var backdrop: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                if let snapshot = currentSnapshot {
+                    Image(nsImage: snapshot)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: max(geometry.size.height - model.topInset, 0), alignment: .top)
+                        .clipped()
+                        .padding(.top, model.topInset)
+                        .blur(radius: revealed ? 12 : 0, opaque: true)
+                } else {
+                    FrostedBackdrop(dark: model.pageIsDark).opacity(revealed ? 1 : 0)
+                }
+                (model.pageIsDark ? Color.black : Color.white)
+                    .opacity(revealed ? (model.pageIsDark ? 0.22 : 0.3) : 0)
+            }
+        }
+        .animation(.easeOut(duration: 0.35), value: revealed)
+        .ignoresSafeArea()
+    }
+}
+
+/// Blur reveal：隱藏時輕微模糊、透明、往下偏一點
+private struct BlurReveal: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .blur(radius: hidden ? 10 : 0)
+            .opacity(hidden ? 0 : 1)
+            .offset(y: hidden ? 36 : 0)
+    }
+}
+
+private extension AnyTransition {
+    static var blurReveal: AnyTransition {
+        .modifier(active: BlurReveal(hidden: true), identity: BlurReveal(hidden: false))
+    }
+}
+
+private struct TabCard: View {
+    let tab: BrowserModel.TabItem
+    let isCurrent: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ZStack(alignment: .topTrailing) {
+                preview
+                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(isCurrent ? Color.accentColor : Color.primary.opacity(0.12),
+                                          lineWidth: isCurrent ? 2.5 : 0.5)
+                    }
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .padding(6)
+                .opacity(hovering || isCurrent ? 1 : 0)
+                .help(Shortcut.closeTab.help)
+            }
+            Text(tab.title)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .foregroundStyle(isCurrent ? .primary : .secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+    }
+
+    // 縮圖貼齊網頁頂端；沒拍過縮圖的分頁用網站的第一個字母代替
+    @ViewBuilder
+    private var preview: some View {
+        if let snapshot = tab.snapshot {
+            Color.clear.overlay(alignment: .top) {
+                Image(nsImage: snapshot).resizable().scaledToFill()
+            }
+        } else {
+            ZStack {
+                Color.primary.opacity(0.06)
+                Text(String((tab.host.isEmpty ? tab.title : tab.host).prefix(1)).uppercased())
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }

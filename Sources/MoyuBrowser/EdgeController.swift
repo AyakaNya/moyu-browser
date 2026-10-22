@@ -102,6 +102,7 @@ final class EdgeController {
         awayTime = 0
         suppressUntilExit = suppress
         panel.browser.hideAddressBar()
+        panel.browser.hideOverview()
 
         let overshoot = settings.bounce * 0.5
         animatePanel(to: collapsedFrame(), duration: settings.animationDuration * 0.8, fadingIn: false,

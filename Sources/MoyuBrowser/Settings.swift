@@ -53,10 +53,15 @@ final class Settings: ObservableObject {
     /// 陰影強度，0～1
     @Published var shadowStrength: Double { didSet { save(shadowStrength, "shadowStrength") } }
 
-    /// 上次瀏覽的網址；變動很頻繁，所以不發通知。
-    var lastURL: String? {
-        get { defaults.string(forKey: "lastURL") }
-        set { defaults.set(newValue, forKey: "lastURL") }
+    /// 開著的分頁網址；變動很頻繁，所以不發通知。舊版只存一個 lastURL，沒有分頁紀錄時拿它來還原。
+    var savedTabs: [String] {
+        get { defaults.stringArray(forKey: "openTabs") ?? defaults.string(forKey: "lastURL").map { [$0] } ?? [] }
+        set { defaults.set(newValue, forKey: "openTabs") }
+    }
+
+    var savedTabIndex: Int {
+        get { defaults.integer(forKey: "currentTab") }
+        set { defaults.set(newValue, forKey: "currentTab") }
     }
 
     private init() {

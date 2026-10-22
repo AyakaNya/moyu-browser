@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 import WebKit
 
@@ -11,6 +12,7 @@ enum SettingsWindow {
         tabs.tabStyle = .toolbar
         tabs.addTabViewItem(page("一般", "gearshape", height: 440, GeneralTab(settings: settings)))
         tabs.addTabViewItem(page("外觀", "paintbrush", height: 500, AppearanceTab(settings: settings)))
+        tabs.addTabViewItem(page("快捷鍵", "keyboard", height: 560, ShortcutsTab(store: .shared)))
         tabs.addTabViewItem(page("收藏", "star", height: 460, BookmarksTab(bookmarks: bookmarks)))
         tabs.addTabViewItem(page("Cookie", "externaldrive", height: 520, WebsiteDataTab()))
 
@@ -112,6 +114,117 @@ private struct AppearanceTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - 快捷鍵
+
+private struct ShortcutsTab: View {
+    @ObservedObject var store: ShortcutStore
+    @StateObject private var recorder = ShortcutRecorder()
+
+    var body: some View {
+        Form {
+            Section {
+                ForEach(Shortcut.allCases) { shortcut in
+                    LabeledContent(shortcut.title) {
+                        if shortcut.isCustomizable {
+                            ShortcutField(shortcut: shortcut, store: store, recorder: recorder)
+                        } else {
+                            Text(shortcut.keys).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } footer: {
+                Text("先點一下面板，快捷鍵才會生效。").font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Button("全部還原預設") {
+                    recorder.stop()
+                    store.resetAll()
+                }
+                .disabled(store.custom.isEmpty)
+            }
+        }
+        .formStyle(.grouped)
+        .onDisappear { recorder.stop() }
+    }
+}
+
+private struct ShortcutField: View {
+    let shortcut: Shortcut
+    @ObservedObject var store: ShortcutStore
+    @ObservedObject var recorder: ShortcutRecorder
+
+    private var isRecording: Bool { recorder.recording == shortcut }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if isRecording, let conflict = recorder.conflict {
+                Text("已用於「\(conflict)」").font(.caption).foregroundStyle(.red)
+            }
+            Button {
+                isRecording ? recorder.stop() : recorder.start(shortcut)
+            } label: {
+                Text(isRecording ? "按下新的組合" : store.combo(for: shortcut)?.display ?? "—")
+                    .frame(minWidth: 84)
+            }
+            .buttonStyle(.bordered)
+            .tint(isRecording ? .accentColor : nil)
+            if store.isCustomized(shortcut) {
+                Button { store.reset(shortcut) } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .buttonStyle(.borderless)
+                .help("還原預設（\(shortcut.defaultCombo?.display ?? "")）")
+            }
+        }
+    }
+}
+
+/// 錄製快捷鍵：一次只錄一個，Esc 取消；要帶 ⌘、⌃ 或 ⌥，跟別的用途重複時不採用
+@MainActor
+private final class ShortcutRecorder: ObservableObject {
+    @Published private(set) var recording: Shortcut?
+    @Published private(set) var conflict: String?
+    private var monitor: Any?
+
+    func start(_ shortcut: Shortcut) {
+        stop()
+        recording = shortcut
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let consumed = MainActor.assumeIsolated { self?.record(event) ?? false }
+            return consumed ? nil : event
+        }
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = nil
+        conflict = nil
+    }
+
+    private func record(_ event: NSEvent) -> Bool {
+        guard let shortcut = recording else { return false }
+        let combo = KeyCombo(event)
+        if combo.flags.isEmpty, Int(event.keyCode) == kVK_Escape {
+            stop()
+            return true
+        }
+        guard !combo.flags.isDisjoint(with: [.command, .control, .option]) else {
+            NSSound.beep()
+            return true
+        }
+        if let other = ShortcutStore.shared.conflict(for: combo, excluding: shortcut) {
+            conflict = other
+            NSSound.beep()
+            return true
+        }
+        ShortcutStore.shared.set(combo, for: shortcut)
+        stop()
+        return true
     }
 }
 
