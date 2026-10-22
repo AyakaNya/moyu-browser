@@ -32,6 +32,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MoyuBrowser"
 cp Support/Info.plist "$APP/Contents/Info.plist"
+cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP" >/dev/null 2>&1
 echo "已打包：$APP（$(lipo -archs "$APP/Contents/MacOS/MoyuBrowser")）"
 

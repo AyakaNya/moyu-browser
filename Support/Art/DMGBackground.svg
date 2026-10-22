@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <!-- 圖示位置（Finder 座標）：App 在 (170, 205)，「應用程式」在 (490, 205)，圖示 128pt -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F3FBFF"/>
+      <stop offset="1" stop-color="#CDEBFF"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8ED3FA"/>
+      <stop offset="1" stop-color="#4FA9EE"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="660" height="400" fill="url(#sky)"/>
+
+  <!-- 底部海浪 -->
+  <path d="M0 310 C 90 292, 170 326, 260 310 S 440 292, 530 310 S 620 324, 660 312 L 660 400 L 0 400 Z" fill="url(#wave)" opacity="0.45"/>
+  <path d="M0 332 C 110 318, 200 346, 300 332 S 480 318, 580 334 S 640 340, 660 336 L 660 400 L 0 400 Z" fill="#2F86DB"/>
+
+  <!-- 泡泡 -->
+  <circle cx="58" cy="250" r="9" fill="none" stroke="#7CC4F2" stroke-width="2.5" opacity="0.8"/>
+  <circle cx="44" cy="214" r="5" fill="none" stroke="#7CC4F2" stroke-width="2" opacity="0.7"/>
+  <circle cx="612" cy="132" r="7" fill="none" stroke="#7CC4F2" stroke-width="2.5" opacity="0.7"/>
+  <circle cx="628" cy="104" r="4" fill="#7CC4F2" opacity="0.6"/>
+
+  <!-- 標題 -->
+  <text x="330" y="74" text-anchor="middle" font-family="PingFang TC" font-size="26" font-weight="600" fill="#1F3A5F">摸魚瀏覽器</text>
+
+  <!-- 箭頭 -->
+  <path d="M262 205 C 300 178, 360 178, 398 205" fill="none" stroke="#FF7A45" stroke-width="5" stroke-linecap="round" stroke-dasharray="2 13"/>
+  <path d="M384 190 L 402 208 L 378 214" fill="none" stroke="#FF7A45" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 首次開啟說明：放在最下方 32pt 之上，Finder 開著路徑列時才不會被蓋住 -->
+  <text x="330" y="358" text-anchor="middle" font-family="PingFang TC" font-size="11" fill="#FFFFFF">第一次打開若被擋下：系統設定 → 隱私權與安全性 → 強制打開</text>
+</svg>

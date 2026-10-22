@@ -70,6 +70,8 @@ cd moyu-browser
 
 會編譯同時支援 Apple Silicon 和 Intel 的 universal 版本（需要完整的 Xcode），並在 `dist/` 產出 `MoyuBrowser-<版本>.zip` 和 `.dmg`。版本號取自 `Support/Info.plist` 的 `CFBundleShortVersionString`。
 
+換了 `Support/Art/` 裡的圖示原圖或 dmg 背景 SVG 之後，先跑 `./scripts/make-art.sh` 重新產生圖示和 dmg 背景。
+
 ## 使用方式
 
 啟動後，選單列會出現一個 🐟 圖示，螢幕邊緣也會出現一條細條。把滑鼠移到細條附近停一下，面板就會滑出來。
@@ -136,8 +138,14 @@ Sources/MoyuBrowser/
 ├── ShadowWindow.swift     自繪陰影
 └── Debug.swift            除錯紀錄
 Support/Info.plist         App 的 Info.plist
+Support/Art/               App 圖示原圖（AppIcon-source.png）與 dmg 背景的 SVG 原始檔
+Support/AppIcon.icns       App 圖示（由 make-art.sh 產生）
+Support/DMGBackground.tiff dmg 背景（由 make-art.sh 產生）
 scripts/build.sh           編譯並打包成 .app
-scripts/package.sh         產出可發佈的 .zip 與 .dmg
+scripts/package.sh         產出可發佈的 .zip 與 .dmg（含拖拉安裝畫面）
+scripts/make-art.sh        從 SVG 重新產生圖示與 dmg 背景
+scripts/svg2png.swift      make-art.sh 用的 SVG 轉 PNG 工具
+scripts/icon-from-image.swift  make-art.sh 用的圖示裁切工具（裁出圓角方形、去掉白底）
 ```
 
 ## 除錯
